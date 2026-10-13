@@ -1,5 +1,5 @@
 "use client";
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback } from "react";
 import Image from "next/image";
 import { supabase } from "@/utils/Supabase/client";
 import SplashScreen from "./SplashScreen";
@@ -28,8 +28,12 @@ const hasSupabaseConfig = Boolean(
 
 export default function Home() {
   const [gifts, setGifts] = useState<Gift[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(hasSupabaseConfig);
+  const [error, setError] = useState<string | null>(() =>
+    hasSupabaseConfig
+      ? null
+      : "Supabase is not configured. Add your environment variables to enable the gift list."
+  );
   const [customGift, setCustomGift] = useState("");
   const [isAddingGift, setIsAddingGift] = useState(false);
   
@@ -46,14 +50,39 @@ export default function Home() {
   const [rsvpError, setRsvpError] = useState<string | null>(null);
   const [rsvpSuccess, setRsvpSuccess] = useState<string | null>(null);
 
-  useEffect(() => {
+  const fetchGifts = useCallback(async () => {
     if (!hasSupabaseConfig) {
-      setLoading(false);
-      setError("Supabase is not configured. Add your environment variables to enable the gift list.");
       return;
     }
 
-    fetchGifts();
+    try {
+      const { data, error } = await supabase
+        .from("gifts")
+        .select("*")
+        .order("id");
+
+      if (error) {
+        console.error("Supabase error:", error);
+        setError(`Database error: ${error.message}`);
+        return;
+      }
+
+      setError(null);
+      setGifts(data || []);
+    } catch (err) {
+      console.error("Error fetching gifts:", err);
+      setError(err instanceof Error ? err.message : "Failed to load gifts");
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!hasSupabaseConfig) {
+      return;
+    }
+
+    void Promise.resolve().then(fetchGifts);
 
     const giftsSubscription = supabase
       .channel("gifts-changes")
@@ -61,7 +90,7 @@ export default function Home() {
         "postgres_changes",
         { event: "*", schema: "public", table: "gifts" },
         () => {
-          fetchGifts();
+          void fetchGifts();
         }
       )
       .subscribe();
@@ -69,7 +98,7 @@ export default function Home() {
     return () => {
       supabase.removeChannel(giftsSubscription);
     };
-  }, []);
+  }, [fetchGifts]);
 
   // Handle sidebar body scroll prevention - FIXED
   useEffect(() => {
@@ -86,37 +115,6 @@ export default function Home() {
       body.classList.remove('sidebar-open');
     };
   }, [isSidebarOpen]);
-
-  const fetchGifts = async () => {
-    if (!hasSupabaseConfig) {
-      setLoading(false);
-      setError("Supabase is not configured. Add your environment variables to enable the gift list.");
-      return;
-    }
-
-    try {
-      setLoading(true);
-      setError(null);
-
-      const { data, error } = await supabase
-        .from("gifts")
-        .select("*")
-        .order("id");
-
-      if (error) {
-        console.error("Supabase error:", error);
-        setError(`Database error: ${error.message}`);
-        return;
-      }
-
-      setGifts(data || []);
-    } catch (err) {
-      console.error("Error fetching gifts:", err);
-      setError(err instanceof Error ? err.message : "Failed to load gifts");
-    } finally {
-      setLoading(false);
-    }
-  };
 
   const reserveGift = async (id: number, giftName: string) => {
     if (!hasSupabaseConfig) {
