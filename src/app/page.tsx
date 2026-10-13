@@ -1,0 +1,631 @@
+"use client";
+import { useState, useEffect } from "react";
+import Image from "next/image";
+import { supabase } from "@/utils/Supabase/client";
+import SplashScreen from "./SplashScreen";
+
+// Define a proper type for gifts
+interface Gift {
+  id: number;
+  name: string;
+  is_taken: boolean;
+  reserved_by?: string;
+  created_at?: string;
+}
+
+type AttendanceStatus = 'attending' | 'not_attending' | 'maybe';
+
+type RsvpFormState = {
+  name: string;
+  attendance: AttendanceStatus | '';
+  message: string;
+};
+
+const hasSupabaseConfig = Boolean(
+  process.env.NEXT_PUBLIC_SUPABASE_URL &&
+  process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY
+);
+
+export default function Home() {
+  const [gifts, setGifts] = useState<Gift[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [customGift, setCustomGift] = useState("");
+  const [isAddingGift, setIsAddingGift] = useState(false);
+  
+  // Sidebar state
+  const [isSidebarOpen, setIsSidebarOpen] = useState(false);
+
+  // RSVP states
+  const [rsvpForm, setRsvpForm] = useState<RsvpFormState>({
+    name: '',
+    attendance: '',
+    message: ''
+  });
+  const [isSubmittingRsvp, setIsSubmittingRsvp] = useState(false);
+  const [rsvpError, setRsvpError] = useState<string | null>(null);
+  const [rsvpSuccess, setRsvpSuccess] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!hasSupabaseConfig) {
+      setLoading(false);
+      setError("Supabase is not configured. Add your environment variables to enable the gift list.");
+      return;
+    }
+
+    fetchGifts();
+
+    const giftsSubscription = supabase
+      .channel("gifts-changes")
+      .on(
+        "postgres_changes",
+        { event: "*", schema: "public", table: "gifts" },
+        () => {
+          fetchGifts();
+        }
+      )
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(giftsSubscription);
+    };
+  }, []);
+
+  // Handle sidebar body scroll prevention - FIXED
+  useEffect(() => {
+    const body = document.body;
+    if (isSidebarOpen) {
+      // Add class to body instead of directly manipulating style
+      body.classList.add('sidebar-open');
+    } else {
+      body.classList.remove('sidebar-open');
+    }
+
+    // Cleanup function to restore scroll when component unmounts
+    return () => {
+      body.classList.remove('sidebar-open');
+    };
+  }, [isSidebarOpen]);
+
+  const fetchGifts = async () => {
+    if (!hasSupabaseConfig) {
+      setLoading(false);
+      setError("Supabase is not configured. Add your environment variables to enable the gift list.");
+      return;
+    }
+
+    try {
+      setLoading(true);
+      setError(null);
+
+      const { data, error } = await supabase
+        .from("gifts")
+        .select("*")
+        .order("id");
+
+      if (error) {
+        console.error("Supabase error:", error);
+        setError(`Database error: ${error.message}`);
+        return;
+      }
+
+      setGifts(data || []);
+    } catch (err) {
+      console.error("Error fetching gifts:", err);
+      setError(err instanceof Error ? err.message : "Failed to load gifts");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const reserveGift = async (id: number, giftName: string) => {
+    if (!hasSupabaseConfig) {
+      setError("Supabase is not configured. Please add your environment variables to reserve gifts.");
+      return;
+    }
+
+    try {
+      setGifts(prevGifts =>
+        prevGifts.map(gift =>
+          gift.id === id ? { ...gift, is_taken: true } : gift
+        )
+      );
+
+      const { error } = await supabase
+        .from("gifts")
+        .update({ is_taken: true })
+        .eq("id", id);
+
+      if (error) {
+        console.error("Error reserving gift:", error);
+        setError(`Failed to reserve ${giftName}: ${error.message}`);
+
+        setGifts(prevGifts =>
+          prevGifts.map(gift =>
+            gift.id === id ? { ...gift, is_taken: false } : gift
+          )
+        );
+      } else {
+        setError(null);
+      }
+    } catch (err) {
+      console.error("Error in reserveGift:", err);
+      setError(`Failed to reserve ${giftName}`);
+
+      setGifts(prevGifts =>
+        prevGifts.map(gift =>
+          gift.id === id ? { ...gift, is_taken: false } : gift
+        )
+      );
+    }
+  };
+
+  const addCustomGift = async () => {
+    if (!customGift.trim()) {
+      setError("Please enter a gift name");
+      return;
+    }
+
+    if (!hasSupabaseConfig) {
+      setError("Supabase is not configured. Please add your environment variables to add gift ideas.");
+      return;
+    }
+
+    try {
+      setIsAddingGift(true);
+      setError(null);
+
+      const { error } = await supabase
+        .from("gifts")
+        .insert([{ name: customGift.trim(), is_taken: false }])
+        .select()
+        .single();
+
+      if (error) {
+        console.error("Error adding custom gift:", error);
+        setError(`Failed to add "${customGift}": ${error.message}`);
+      } else {
+        setCustomGift("");
+        setError(null);
+      }
+    } catch (err) {
+      console.error("Error in addCustomGift:", err);
+      setError(`Failed to add "${customGift}"`);
+    } finally {
+      setIsAddingGift(false);
+    }
+  };
+
+  const submitRsvp = async () => {
+    if (!rsvpForm.name.trim()) {
+      setRsvpError("Please enter your name");
+      return;
+    }
+
+    if (!rsvpForm.attendance) {
+      setRsvpError("Please select your attendance status");
+      return;
+    }
+
+    if (!hasSupabaseConfig) {
+      setRsvpError("Supabase is not configured. Please add your environment variables to submit the RSVP form.");
+      return;
+    }
+
+    try {
+      setIsSubmittingRsvp(true);
+      setRsvpError(null);
+      setRsvpSuccess(null);
+
+      const { error } = await supabase
+        .from("confirmations")
+        .insert([{
+          name: rsvpForm.name.trim(),
+          attendance: rsvpForm.attendance,
+          message: rsvpForm.message.trim() || null
+        }])
+        .select()
+        .single();
+
+      if (error) {
+        console.error("Error submitting RSVP:", error);
+        if (error.message.includes('unique')) {
+          setRsvpError("You have already confirmed your attendance. Thank you!");
+        } else {
+          setRsvpError(`Failed to submit RSVP: ${error.message}`);
+        }
+      } else {
+        setRsvpForm({ name: '', attendance: '', message: '' });
+        setRsvpSuccess("Thank you for your confirmation! We appreciate your response.");
+      }
+    } catch (err) {
+      console.error("Error in submitRsvp:", err);
+      setRsvpError("Failed to submit RSVP. Please try again.");
+    } finally {
+      setIsSubmittingRsvp(false);
+    }
+  };
+
+  const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === "Enter") {
+      addCustomGift();
+    }
+  };
+
+  const handleRsvpKeyDown = (e: React.KeyboardEvent<HTMLInputElement | HTMLTextAreaElement>) => {
+    if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      submitRsvp();
+    }
+  };
+
+  const toggleSidebar = () => {
+    setIsSidebarOpen(prev => !prev);
+  };
+
+  const handleNavClick = (href: string) => {
+    setIsSidebarOpen(false);
+    setTimeout(() => {
+      const element = document.querySelector(href);
+      if (element) {
+        element.scrollIntoView({ behavior: 'smooth' });
+      }
+    }, 100);
+  };
+
+  return (
+    <SplashScreen>
+    <>
+      {/* HOME SECTION */}
+      <div className="container1" id="home">
+        {/* Desktop Header */}
+        <header className="header desktop-header">
+          <ul>
+            <li><a href="#venueandschedule">VENUE</a></li>
+            <li><a href="#theme">THEME</a></li>
+            <li><a href="#rsvp">RSVP</a></li>
+            <li className="logo-container">
+              <a href="#home">
+                <Image
+                  src="/assests/img/logo.png"
+                  alt="John & Jade Logo"
+                  className="logo"
+                  width={100}
+                  height={100}
+                />
+              </a>
+            </li>
+            <li><a href="#eventorder">EVENT ORDERS</a></li>
+            <li><a href="#giftguide">GIFT GUIDE</a></li>
+            <li><a href="#reminders">REMINDERS</a></li>
+          </ul>
+        </header>
+
+        {/* Mobile Header */}
+        <header className="mobile-header">
+          <div className="mobile-header-content">
+            <button 
+              className="menu-toggle"
+              onClick={toggleSidebar}
+              aria-label="Toggle menu"
+              aria-expanded={isSidebarOpen}
+              type="button"
+            >
+              <Image
+                src="/assests/img/logo.png"
+                alt="John & Jade Logo"
+                className="logo"
+                width={40}
+                height={40}
+              />
+            </button>
+          </div>
+        </header>
+
+        {/* Mobile Sidebar - FIXED positioning */}
+        <div className={`sidebar ${isSidebarOpen ? 'sidebar-open' : ''}`}>
+          <div className="sidebar-content">
+            <button 
+              className="sidebar-close"
+              onClick={toggleSidebar}
+              aria-label="Close menu"
+              type="button"
+            >
+              ×
+            </button>
+            <nav className="sidebar-nav">
+              <button type="button" onClick={() => handleNavClick('#venueandschedule')}>VENUE</button>
+              <button type="button" onClick={() => handleNavClick('#theme')}>THEME</button>
+              <button type="button" onClick={() => handleNavClick('#rsvp')}>RSVP</button>
+              <button type="button" onClick={() => handleNavClick('#eventorder')}>EVENT ORDERS</button>
+              <button type="button" onClick={() => handleNavClick('#giftguide')}>GIFT GUIDE</button>
+              <button type="button" onClick={() => handleNavClick('#reminders')}>REMINDERS</button>
+            </nav>
+          </div>
+        </div>
+
+        {/* Sidebar Overlay */}
+        {isSidebarOpen && (
+          <div 
+            className="sidebar-overlay"
+            onClick={toggleSidebar}
+          />
+        )}
+
+        <div className="content pb-32">
+          <h1>WE&apos;RE GETTING MARRIED!</h1>
+          <h3>October 25, 2025 | Opol, Misamis Oriental</h3>
+        </div>
+      </div>  
+
+      {/* VENUE & SCHEDULE */}
+      <div className="venue-wrapper">
+        <div className="venue-container" id="venueandschedule">
+          <span><br/></span>
+          <h2>John Vincent</h2>
+          <p>and</p>
+          <h2>Earla Jade Naiza</h2>
+          <h4>cordially invite you to celebrate life and love</h4>
+          <div className="venue-grid">
+            {/* Church Ceremony */}
+            <div className="venue-card">
+              <div className="venue-image">
+                <h1>WEDDING CEREMONY</h1>
+                <Image
+                  src="/assests/img/church.png"
+                  alt="Church Venue"
+                  className="venue-photo"
+                  width={400}
+                  height={300}
+                />
+              </div>
+              <div className="venue-details">
+                <div className="venue-name">Our Lady of Consolacion Parish</div>
+                <div className="venue-address">Corner Valacares & Salva Sts., Opol, Misamis Oriental</div>
+                <div className="venue-datetime">October 25, 2025 | 9:30 AM</div>
+                <a
+                  href="https://maps.google.com"
+                  target="_blank"
+                  className="map-btn"
+                >
+                  View on Maps
+                </a>
+              </div>
+            </div>
+
+            {/* Reception */}
+            <div className="venue-card">
+              <div className="venue-image">
+                <h1>RECEPTION</h1>
+                <Image
+                  src="/assests/img/chitos.png"
+                  alt="Reception Venue"
+                  className="venue-photo"
+                  width={400}
+                  height={300}
+                />
+              </div>
+              <div className="venue-details">
+                <div className="venue-name">Chito&apos;s Tuna House</div>
+                <div className="venue-address">Natnl Highway, Taboc, Opol, Misamis Oriental</div>
+                <div className="venue-datetime">     <br/></div>
+                <a
+                  href="https://maps.app.goo.gl/1ZNqpUcFXgPdNSoEA"
+                  target="_blank"
+                  className="map-btn"
+                >
+                  View on Maps
+                </a>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* THEME */}
+      <div className="two-column-section" id="theme">
+        <div className="container4">
+          <h1>Theme</h1>
+          <h2>
+            Celebrate with us in the glow of blue and yellow.
+          </h2>
+          <Image
+            src="/assests/img/palette.png"
+            alt="Theme Image"
+            className="palette-img"
+            width={600}
+            height={300}
+          />
+        </div>
+      </div>
+
+      {/* RSVP SECTION */}
+      <div className="container5" id="rsvp">
+        <h1>RSVP</h1>
+        <h2>
+          Please confirm your attendance by filling out the form below.<br/>
+          Your response helps us plan the perfect celebration!
+        </h2>
+
+        <div className="rsvp-form-container">
+          <div className="rsvp-form">
+            <div className="form-group">
+              <label htmlFor="name">Your Name *</label>
+              <input
+                id="name"
+                type="text"
+                value={rsvpForm.name}
+                onChange={(e) => setRsvpForm({ ...rsvpForm, name: e.target.value })}
+                onKeyDown={handleRsvpKeyDown}
+                placeholder="Enter your full name"
+                disabled={isSubmittingRsvp}
+                className="form-input"
+              />
+            </div>
+
+            <div className="form-group">
+              <label>Will you be attending? *</label>
+              <div className="radio-group">
+                <label className="radio-option">
+                  <input
+                    type="radio"
+                    name="attendance"
+                    value="attending"
+                    checked={rsvpForm.attendance === 'attending'}
+                    onChange={(e) => setRsvpForm({ ...rsvpForm, attendance: e.target.value as AttendanceStatus })}
+                    disabled={isSubmittingRsvp}
+                  />
+                  <span>Yes, I&apos;ll be there!</span>
+                </label>
+                <label className="radio-option">
+                  <input
+                    type="radio"
+                    name="attendance"
+                    value="maybe"
+                    checked={rsvpForm.attendance === 'maybe'}
+                    onChange={(e) => setRsvpForm({ ...rsvpForm, attendance: e.target.value as AttendanceStatus })}
+                    disabled={isSubmittingRsvp}
+                  />
+                  <span>Maybe, I&apos;ll let you know soon</span>
+                </label>
+                <label className="radio-option">
+                  <input
+                    type="radio"
+                    name="attendance"
+                    value="not_attending"
+                    checked={rsvpForm.attendance === 'not_attending'}
+                    onChange={(e) => setRsvpForm({ ...rsvpForm, attendance: e.target.value as AttendanceStatus })}
+                    disabled={isSubmittingRsvp}
+                  />
+                  <span>Sorry, can&apos;t make it</span>
+                </label>
+              </div>
+            </div>
+
+            <div className="form-group">
+              <label htmlFor="message">Message (Optional)</label>
+              <textarea
+                id="message"
+                value={rsvpForm.message}
+                onChange={(e) => setRsvpForm({ ...rsvpForm, message: e.target.value })}
+                onKeyDown={handleRsvpKeyDown}
+                placeholder="Leave a message for the couple..."
+                disabled={isSubmittingRsvp}
+                className="form-textarea"
+                rows={3}
+              />
+            </div>
+
+            {rsvpError && <div className="rsvp-error">{rsvpError}</div>}
+            {rsvpSuccess && <div className="rsvp-success">{rsvpSuccess}</div>}
+
+            <button
+              type="button"
+              onClick={submitRsvp}
+              disabled={isSubmittingRsvp || !rsvpForm.name.trim() || !rsvpForm.attendance}
+              className="rsvp-submit-btn"
+            >
+              {isSubmittingRsvp ? "Submitting..." : "Submit RSVP"}
+            </button>
+          </div>
+        </div>
+          <div className="rsvp-image-section" id="eventorder">   
+            <h1>Events Order</h1> 
+            <div className="rsvp-image-container">
+              <Image
+                src="/assests/img/chitos.png"
+                alt="John & Jade"
+                className="rsvp-image"
+                width={400}
+                height={500}
+              />
+            </div>
+          </div>
+      </div>
+
+      {/* GIFT GUIDE */}
+      <div className="container6" id="giftguide">
+        <h1>Gift Guide</h1>
+        <h2>
+          Your presence is already the greatest gift. <br />
+          But if you wish to bless us more, we would <br />truly appreciate a gift of cash or any little <br />help for our new beginning.
+        </h2>
+
+        <div className="gift-columns">
+          {loading && <div className="gift-loading">Loading gifts...</div>}
+
+          {error && <div className="gift-error">Error: {error}</div>}
+
+          {!loading && !error && gifts.length === 0 && (
+            <div className="gift-empty">No gifts found in database.</div>
+          )}
+
+          {!loading && gifts.length > 0 && (
+            <>
+              <div className="gift-stats">
+                <strong>{gifts.filter(g => !g.is_taken).length}</strong> gifts available •{" "}
+                <strong>{gifts.filter(g => g.is_taken).length}</strong> gifts reserved
+              </div>
+
+              <ul className="gift-list">
+                {gifts.map(gift => (
+                  <li key={gift.id} className={gift.is_taken ? "taken" : ""}>
+                    <span className={gift.is_taken ? "taken" : ""}>{gift.name}</span>
+                    <button
+                      type="button"
+                      disabled={gift.is_taken || loading}
+                      onClick={() => reserveGift(gift.id, gift.name)}
+                    >
+                      {gift.is_taken ? "Reserved" : "Reserve"}
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            </>
+          )}
+
+          {/* Custom Gift Input Section */}
+          <div className="custom-gift-section">
+            <h3 className="custom-gift-title">Suggest Your Own Gift Idea</h3>
+            <div className="custom-gift-input-row">
+              <input
+                type="text"
+                value={customGift}
+                onChange={e => setCustomGift(e.target.value)}
+                onKeyDown={handleKeyDown}
+                placeholder="Enter your gift suggestion..."
+                disabled={isAddingGift}
+                className="custom-gift-input"
+              />
+              <button
+                type="button"
+                onClick={addCustomGift}
+                disabled={isAddingGift || !customGift.trim()}
+                className="custom-gift-btn"
+              >
+                {isAddingGift ? "Adding..." : "Add Gift"}
+              </button>
+            </div>
+            <p className="custom-gift-description">
+              Share your gift ideas with John & Jade!
+            </p>
+          </div>
+        </div>
+      </div>
+
+      {/* REMINDERS */}
+      <div className="container7" id="reminders">
+        <h1>Reminders</h1>
+        <ul className="reminder-list">
+          <li>• Please arrive at least 30 minutes early,  the ceremony is most important to us.</li>
+          <li>• Our reception has limited seating<br/>◦ Kindly honor the number of invites; or 
+          <br/>◦ Let us know if you&apos;re unable to come thru this website (preferably on or before October 13, 2025)
+          </li>
+          <li>• After the Mass, please stay and join us for photos.</li>
+          <li>• Enjoy and take part in the reception program. </li>
+        </ul>
+      </div>
+    </>
+    </SplashScreen>
+  );
+} 
